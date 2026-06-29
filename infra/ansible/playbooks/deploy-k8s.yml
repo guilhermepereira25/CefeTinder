@@ -1,0 +1,32 @@
+---
+- name: Deploy API 2 Notification Service to Kubernetes
+  hosts: kubernetes_hosts
+  gather_facts: false
+  vars:
+    project_root: "{{ playbook_dir }}/../../.."
+    manifests:
+      - infra/kubernetes/namespace.yaml
+      - infra/kubernetes/limit-range.yaml
+      - infra/kubernetes/resource-quota.yaml
+      - infra/kubernetes/deployment.yaml
+      - infra/kubernetes/service.yaml
+      - infra/kubernetes/ingress.yaml
+      - infra/kubernetes/hpa.yaml
+  tasks:
+    - name: Apply Kubernetes manifests
+      ansible.builtin.command: kubectl apply -f {{ project_root }}/{{ item }}
+      loop: "{{ manifests }}"
+      changed_when: true
+
+    - name: Wait for Notification Service rollout
+      ansible.builtin.command: kubectl rollout status deployment/notification-service -n cefetinder --timeout=180s
+      changed_when: false
+
+    - name: Show Kubernetes deployment summary
+      ansible.builtin.command: kubectl get deployment,svc,ingress,hpa -n cefetinder
+      register: kubernetes_summary
+      changed_when: false
+
+    - name: Print Kubernetes deployment summary
+      ansible.builtin.debug:
+        var: kubernetes_summary.stdout_lines

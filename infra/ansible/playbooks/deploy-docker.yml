@@ -1,0 +1,35 @@
+---
+- name: Deploy API 1 GraphQL container
+  hosts: docker_hosts
+  gather_facts: false
+  vars:
+    graphql_image: "{{ lookup('env', 'GRAPHQL_IMAGE') | default('ghcr.io/guilhermepereira25/cefetinder-graphql-api:latest', true) }}"
+    graphql_container_name: cefetinder-graphql-api
+    graphql_host_port: "{{ lookup('env', 'GRAPHQL_HOST_PORT') | default('4000', true) }}"
+    user_service_address: "{{ lookup('env', 'USER_SERVICE_ADDRESS') | default('localhost:50051', true) }}"
+    match_service_address: "{{ lookup('env', 'MATCH_SERVICE_ADDRESS') | default('localhost:50052', true) }}"
+  tasks:
+    - name: Pull GraphQL image
+      ansible.builtin.command: docker pull {{ graphql_image }}
+      changed_when: true
+
+    - name: Remove previous GraphQL container if present
+      ansible.builtin.command: docker rm -f {{ graphql_container_name }}
+      register: remove_container
+      failed_when: false
+      changed_when: remove_container.rc == 0
+
+    - name: Start GraphQL container
+      ansible.builtin.command: >-
+        docker run -d
+        --name {{ graphql_container_name }}
+        --restart unless-stopped
+        -p {{ graphql_host_port }}:4000
+        -e USER_SERVICE_ADDRESS={{ user_service_address }}
+        -e MATCH_SERVICE_ADDRESS={{ match_service_address }}
+        {{ graphql_image }}
+      changed_when: true
+
+    - name: Show deployment summary
+      ansible.builtin.debug:
+        msg: "GraphQL API deployed as {{ graphql_container_name }} using image {{ graphql_image }} on port {{ graphql_host_port }}."

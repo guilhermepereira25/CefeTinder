@@ -222,6 +222,66 @@ aws rds describe-db-instances \
 pg_isready -h localhost -p 7001 -U user -d cefetinder
 ```
 
+## CI/CD com Ansible e Pipeline
+
+A fase de CI/CD está implementada com GitHub Actions e Ansible.
+
+### Arquivos relacionados
+
+- Pipeline: `.github/workflows/pipeline.yml`.
+- Configuração SonarQube: `sonar-project.properties`.
+- Configuração Jest: `jest.config.js`.
+- Testes da API 1: `src/graphql/resolvers/user.resolver.test.ts`.
+- Testes da API 2: `src/notification-service/application/use-cases/NotifyLikeUseCase.test.ts`.
+- Ansible: `infra/ansible/`.
+
+### Etapas do pipeline
+
+- Executa testes unitários das duas APIs escolhidas.
+- Gera cobertura em `coverage/`.
+- Sobe SonarQube em container Docker no ambiente de CI.
+- Executa análise SonarQube com Quality Gate obrigatório.
+- Executa SAST com Semgrep.
+- Faz build da imagem Docker da API 1 (`GraphQL Server`).
+- Publica a imagem da API 1 no GHCR.
+- Executa deploy da API 1 via `deploy-docker.yml`.
+- Cria cluster `kind`, carrega a imagem da API 2 e executa deploy Kubernetes via `deploy-k8s.yml`.
+- Executa DAST com OWASP ZAP baseline contra a URL de homologação.
+- Emite notificações simples por `echo` com resumo de sucesso/falha.
+
+### Testes locais
+
+```bash
+npm test
+npm run test:api1
+npm run test:api2
+npm run test:ci
+```
+
+### Deploy via Ansible
+
+API 1 em Docker:
+
+```bash
+ansible-playbook -i infra/ansible/hosts.ini infra/ansible/playbooks/deploy-docker.yml
+```
+
+API 2 em Kubernetes:
+
+```bash
+ansible-playbook -i infra/ansible/hosts.ini infra/ansible/playbooks/deploy-k8s.yml
+```
+
+### Registry
+
+A imagem da API 1 é publicada no GitHub Container Registry:
+
+```text
+ghcr.io/<usuario-ou-org>/cefetinder-graphql-api:<sha>
+```
+
+O GHCR foi mantido como registry privado da entrega porque a criação do ECR no Floci apresentou timeout na fase anterior.
+
 ### Estrutura do projeto
 
 - `src/services/user`: Serviço de gerenciamento de usuários

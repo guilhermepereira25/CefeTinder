@@ -1,0 +1,199 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+env:
+  NODE_VERSION: "22"
+  GRAPHQL_IMAGE: ghcr.io/${{ github.repository_owner }}/cefetinder-graphql-api:${{ github.sha }}
+  NOTIFICATION_IMAGE: cefetinder/notification-service:latest
+  GATEWAY_URL: http://localhost:8081/notifications
+
+jobs:
+  tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run API unit tests
+        run: npm run test:ci
+
+      - name: Upload test coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage
+
+  sonarqube:
+    name: SonarQube Quality Gate
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate coverage
+        run: npm run test:ci
+
+      - name: Start SonarQube
+        run: docker run -d --name sonarqube -p 9000:9000 sonarqube:community
+
+      - name: Wait for SonarQube
+        run: |
+          for i in {1..60}; do
+            status=$(curl -s http://localhost:9000/api/system/status | jq -r '.status // empty')
+            if [ "$status" = "UP" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs sonarqube
+          exit 1
+
+      - name: Run Sonar scanner with Quality Gate
+        run: |
+          docker run --rm --network host \
+            -v "$PWD:/usr/src" \
+            sonarsource/sonar-scanner-cli:latest \
+            -Dsonar.host.url=http://localhost:9000 \
+            -Dsonar.login=admin \
+            -Dsonar.password=admin \
+            -Dsonar.qualitygate.wait=true
+
+  sast:
+    name: SAST Semgrep
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST
+        run: docker run --rm -v "$PWD:/src" semgrep/semgrep semgrep scan --config auto /src
+
+  build_push:
+    name: Build and Push API 1
+    runs-on: ubuntu-latest
+    needs:
+      - tests
+      - sonarqube
+      - sast
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build GraphQL image
+        run: docker build -f infra/apis/api-1/Dockerfile -t "$GRAPHQL_IMAGE" .
+
+      - name: Push GraphQL image
+        run: docker push "$GRAPHQL_IMAGE"
+
+      - name: Notify build result
+        run: echo "GraphQL image pushed to $GRAPHQL_IMAGE"
+
+  deploy_homolog:
+    name: Deploy Homolog and DAST
+    runs-on: ubuntu-latest
+    needs: build_push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: |
+          python3 -m pip install --user ansible
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Deploy API 1 with Ansible Docker playbook
+        env:
+          GRAPHQL_IMAGE: ${{ env.GRAPHQL_IMAGE }}
+          USER_SERVICE_ADDRESS: host.docker.internal:50051
+          MATCH_SERVICE_ADDRESS: host.docker.internal:50052
+        run: ansible-playbook -i infra/ansible/hosts.ini infra/ansible/playbooks/deploy-docker.yml
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: cefetinder
+          config: infra/kubernetes/kind-cluster.yaml
+
+      - name: Build API 2 image
+        run: docker build -f infra/apis/api-2/Dockerfile -t "$NOTIFICATION_IMAGE" .
+
+      - name: Load API 2 image into kind
+        run: kind load docker-image "$NOTIFICATION_IMAGE" --name cefetinder
+
+      - name: Install ingress-nginx
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+          kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=180s
+
+      - name: Install metrics-server
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+          kubectl patch deployment metrics-server -n kube-system --type=json -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl rollout status deployment/metrics-server -n kube-system --timeout=180s
+
+      - name: Deploy API 2 with Ansible Kubernetes playbook
+        run: ansible-playbook -i infra/ansible/hosts.ini infra/ansible/playbooks/deploy-k8s.yml
+
+      - name: Run OWASP ZAP baseline DAST
+        run: |
+          mkdir -p zap-report
+          set +e
+          docker run --rm --network host \
+            -v "$PWD/zap-report:/zap/wrk" \
+            zaproxy/zap-stable zap-baseline.py \
+            -t "$GATEWAY_URL" \
+            -r zap-baseline.html
+          zap_exit=$?
+          if [ "$zap_exit" -eq 0 ] || [ "$zap_exit" -eq 2 ]; then
+            exit 0
+          fi
+          exit "$zap_exit"
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap-report
+
+      - name: Notify deploy result
+        if: always()
+        run: echo "Pipeline finished with status ${{ job.status }}"
