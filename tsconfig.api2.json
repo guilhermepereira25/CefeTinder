@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist"
+  },
+  "include": [
+    "./src/websocket/server.ts",
+    "./src/notification-service/**/*.ts",
+    "./src/messaging/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "./src/chat-service/**/*"
+  ]
+}

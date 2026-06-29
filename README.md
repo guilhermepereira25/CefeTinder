@@ -4,6 +4,12 @@
 
 Um aplicativo de encontros para estudantes do CEFET, desenvolvido com arquitetura de microsserviços.
 
+## Repositório original
+
+Este trabalho utiliza como base o repositório original disponível em:
+
+https://github.com/CainaZumaa/CefeTinder
+
 ## Arquitetura
 
 O projeto utiliza uma arquitetura de microsserviços com os seguintes componentes:
@@ -16,6 +22,205 @@ O projeto utiliza uma arquitetura de microsserviços com os seguintes componente
 - **User Service**: Gerenciamento de usuários e preferências (gRPC)
 - **Match Service**: Sistema de matching e likes (gRPC)
 - **Notification Service**: Sistema de notificações em tempo real (WebSocket)
+
+## APIs escolhidas para o trabalho
+
+Para atender aos requisitos do trabalho de infraestrutura e DevOps, foram escolhidas duas APIs principais do projeto. A lógica de negócio original será mantida; o escopo do trabalho é adicionar a camada de infraestrutura ao redor dessas APIs.
+
+### API 1: GraphQL Server
+
+- **Linguagem:** TypeScript, executado em Node.js.
+- **Localização principal:** `src/graphql/server.ts`.
+- **Porta interna:** `4000`.
+- **Rota via gateway:** `/graphql`.
+- **Responsabilidade:** expor a API principal consumida pelo frontend, centralizando as operações de usuários, preferências, likes e matches por meio de GraphQL.
+- **Comunicação interna:** acessa os serviços `User Service` e `Match Service` via gRPC.
+- **Uso no trabalho:** será a API usada como foco para containerização com Docker, publicação da imagem em registry privado e deploy em EC2 ou ambiente equivalente.
+
+### API 2: Notification Service
+
+- **Linguagem:** TypeScript, executado em Node.js.
+- **Localização principal:** `src/websocket/server.ts` e `src/notification-service/`.
+- **Porta interna:** `8080`.
+- **Rota via gateway:** `/notifications`.
+- **Responsabilidade:** manter conexões WebSocket para envio de notificações em tempo real, como eventos de likes e matches.
+- **Comunicação interna:** consome eventos publicados no RabbitMQ pelo serviço de matches.
+- **Uso no trabalho:** será a API usada como foco para implantação em Kubernetes, com Deployment, Service, Ingress, HPA, probes, quotas e limites de recursos.
+
+## API Gateway do trabalho
+
+O gateway da entrega de infraestrutura será provisionado com Terraform usando API Gateway compatível com AWS via Floci. Ele será o ponto único de entrada externo para as APIs escolhidas.
+
+### Rotas publicadas
+
+- `/graphql`: encaminha requisições para a API 1, o `GraphQL Server`.
+- `/graphql/{proxy+}`: encaminha subrotas da API GraphQL, caso sejam necessárias.
+- `/notifications`: encaminha requisições para a API 2, o `Notification Service`.
+- `/notifications/{proxy+}`: encaminha subrotas do serviço de notificações, caso sejam necessárias.
+
+### Infraestrutura relacionada
+
+- Módulo Terraform: `infra/terraform/modules/api-gateway`.
+- Variáveis de exemplo: `infra/terraform/terraform.tfvars.example`.
+- Documentação da etapa: `infra/gateway/README.md`.
+
+As URLs reais das APIs serão conectadas ao gateway nas próximas etapas, quando a API 1 estiver publicada em EC2 ou equivalente e a API 2 estiver publicada pelo Ingress do Kubernetes.
+
+## Docker e Registry da API 1
+
+A API 1 (`GraphQL Server`) possui um Dockerfile multi-stage dedicado em `infra/apis/api-1/Dockerfile`. A imagem será publicada em um registry privado no GitHub Container Registry (`GHCR`).
+
+### Decisão sobre registry
+
+Inicialmente foi prevista a criação de um registry ECR compatível com AWS via Floci. Durante a execução, o `terraform plan` funcionou, mas o `terraform apply` para `aws_ecr_repository` ficou preso até timeout, mesmo com a API ECR respondendo via AWS CLI. Para manter a entrega funcional e permitir build/push real da imagem Docker, a estratégia foi alterada para GitHub Container Registry.
+
+O GHCR atende ao requisito de Docker Registry privado e será usado para armazenar a imagem da API 1.
+
+### Autenticação no GHCR
+
+Crie um token GitHub com permissão de escrita em pacotes (`write:packages`) e autentique o Docker:
+
+```bash
+export GITHUB_USER=<seu-usuario-github>
+export GHCR_TOKEN=<seu-token-github>
+
+echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+```
+
+Se estiver usando GitHub CLI, também é possível atualizar as permissões do token local antes do login:
+
+```bash
+gh auth refresh -s write:packages
+gh auth token | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+```
+
+### Build e push da imagem
+
+Execute a partir da raiz do repositório:
+
+```bash
+export GITHUB_USER=<seu-usuario-github>
+export IMAGE_NAME=ghcr.io/$GITHUB_USER/cefetinder-graphql-api:latest
+
+docker build -f infra/apis/api-1/Dockerfile -t cefetinder/graphql-api:latest .
+docker tag cefetinder/graphql-api:latest "$IMAGE_NAME"
+docker push "$IMAGE_NAME"
+```
+
+Para publicar como pacote privado, ajuste a visibilidade do pacote no GitHub após o primeiro push ou use as configurações da organização/repositório.
+
+No ambiente local, o build da imagem foi validado com sucesso. O push para `ghcr.io/guilhermepereira25/cefetinder-graphql-api:latest` foi testado, mas o token GitHub configurado localmente não possuía o escopo `write:packages`, então o GHCR recusou a publicação. Após autenticar com um token contendo esse escopo, os comandos acima fazem a publicação da imagem.
+
+Documentação específica da imagem: `infra/apis/api-1/README.md`.
+
+### Execução local da imagem
+
+Depois do build, a imagem pode ser testada localmente com:
+
+```bash
+docker run --rm \
+  -p 4000:4000 \
+  -e USER_SERVICE_ADDRESS=host.docker.internal:50051 \
+  -e MATCH_SERVICE_ADDRESS=host.docker.internal:50052 \
+  cefetinder/graphql-api:latest
+```
+
+## Kubernetes da API 2
+
+A API 2 (`Notification Service`) será implantada em Kubernetes. O cluster local de homologação usa `kind` com 1 control-plane e 2 workers, atendendo ao requisito de no mínimo 2 worker nodes.
+
+Arquivos relacionados:
+
+- Configuração do cluster: `infra/kubernetes/kind-cluster.yaml`.
+- Namespace: `infra/kubernetes/namespace.yaml`.
+- Deployment da API 2: `infra/kubernetes/deployment.yaml`.
+- Service da API 2: `infra/kubernetes/service.yaml`.
+- Ingress da API 2: `infra/kubernetes/ingress.yaml`.
+- HPA da API 2: `infra/kubernetes/hpa.yaml`.
+- ResourceQuota: `infra/kubernetes/resource-quota.yaml`.
+- LimitRange: `infra/kubernetes/limit-range.yaml`.
+- Documentação da etapa: `infra/kubernetes/README.md`.
+- Dockerfile da API 2: `infra/apis/api-2/Dockerfile`.
+
+Criação do cluster:
+
+```bash
+kind create cluster --config infra/kubernetes/kind-cluster.yaml
+```
+
+Validação:
+
+```bash
+kubectl get nodes
+```
+
+Resultado esperado:
+
+```text
+cefetinder-control-plane   Ready
+cefetinder-worker          Ready
+cefetinder-worker2         Ready
+```
+
+Aplicação do namespace e deployment:
+
+```bash
+kubectl apply -f infra/kubernetes/namespace.yaml
+kubectl apply -f infra/kubernetes/deployment.yaml
+```
+
+O deployment do `Notification Service` usa 2 réplicas, estratégia `RollingUpdate`, probes TCP de liveness/readiness e requests/limits de CPU e memória.
+
+Aplicação dos recursos complementares:
+
+```bash
+kubectl apply -f infra/kubernetes/limit-range.yaml
+kubectl apply -f infra/kubernetes/resource-quota.yaml
+kubectl apply -f infra/kubernetes/service.yaml
+kubectl apply -f infra/kubernetes/ingress.yaml
+kubectl apply -f infra/kubernetes/hpa.yaml
+```
+
+O `Service` expõe a API 2 internamente na porta `8080`, o `Ingress` publica `/notifications`, e o `HorizontalPodAutoscaler` escala de 2 até 5 réplicas com target de CPU em 60%.
+
+## Banco de Dados
+
+O banco principal do projeto é provisionado com Terraform como uma instância RDS PostgreSQL simulada no Floci.
+
+### Decisão técnica
+
+Foi escolhido PostgreSQL porque o CEFETinder já utiliza PostgreSQL nos serviços de usuários e matches. Como o requisito da fase 5 pede RDS ou DynamoDB, o RDS PostgreSQL é a alternativa mais compatível com o domínio e com a implementação existente.
+
+Nesta etapa, não vamos focar na réplica ou na segregação leitura/escrita. A fase atual fica concentrada no provisionamento do banco principal via Terraform/Floci. A replicação poderá ser tratada posteriormente como evolução.
+
+### Infraestrutura relacionada
+
+- Módulo Terraform: `infra/terraform/modules/database`.
+- Recurso provisionado: `aws_db_instance`.
+- Engine: `postgres`.
+- Versão: `16.3`.
+- Banco padrão: `cefetinder`.
+
+O Floci foi configurado no `docker-compose.yml` com Docker socket, portas `7001-7099` e rede `cefetinder_cefet-tinder-network`, pois o RDS do Floci cria containers PostgreSQL reais e expõe o acesso por proxy TCP.
+
+### Execução
+
+```bash
+terraform -chdir=infra/terraform init
+terraform -chdir=infra/terraform apply
+```
+
+### Validação
+
+```bash
+terraform -chdir=infra/terraform output database_endpoint
+
+aws rds describe-db-instances \
+  --db-instance-identifier cefetinder-postgres \
+  --endpoint-url http://localhost:4566
+
+pg_isready -h localhost -p 7001 -U user -d cefetinder
+```
 
 ### Estrutura do projeto
 

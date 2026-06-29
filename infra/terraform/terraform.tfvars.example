@@ -1,0 +1,20 @@
+project_name = "cefetinder"
+environment  = "homolog"
+aws_region   = "us-east-1"
+
+# Endpoint do API Gateway v2 exposto pelo Floci.
+floci_endpoint = "http://localhost:4566"
+
+# Substituir pelos endpoints reais quando a API 1 estiver no EC2
+# e a API 2 estiver publicada pelo Ingress do Kubernetes.
+graphql_api_url      = "http://graphql-service:4000"
+notification_api_url = "http://notification-service:8080"
+
+# Banco principal do projeto, simulado como RDS PostgreSQL no Floci.
+database_identifier        = "cefetinder-postgres"
+database_engine_version    = "16.3"
+database_instance_class    = "db.t3.micro"
+database_allocated_storage = 20
+database_name              = "cefetinder"
+database_master_username   = "user"
+database_master_password   = "secret123"

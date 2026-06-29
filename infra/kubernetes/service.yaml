@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: cefetinder
+  labels:
+    app: notification-service
+    app.kubernetes.io/name: cefetinder
+    app.kubernetes.io/component: notification-service
+spec:
+  type: ClusterIP
+  selector:
+    app: notification-service
+  ports:
+    - name: websocket
+      port: 8080
+      targetPort: websocket
+      protocol: TCP

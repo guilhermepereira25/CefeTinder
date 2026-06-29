@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist"
+  },
+  "include": [
+    "./src/graphql/**/*.ts",
+    "./src/grpc/**/*.ts",
+    "./src/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "./src/chat-service/**/*"
+  ]
+}

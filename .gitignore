@@ -82,3 +82,12 @@ jspm_packages/
 
 
 jmeter/report*
+
+# Terraform local files
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
